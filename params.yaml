@@ -1,0 +1,10 @@
+ARCHITECTURE: facebook/convnextv2-base-22k-224
+LEARNING_RATE: 0.2
+DATASET: imagewoof
+# options: flowers102, imagewoof, combined
+EPOCHS: 1
+OPTIMIZER: 'adam' 
+BATCH_SIZE: 5
+SCHEDULER: null
+ROOT_DIR : 'data'
+DATA_AUG: null

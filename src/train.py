@@ -13,6 +13,14 @@ import numpy as np
 import yaml 
 import argparse
 
+def set_determinism():
+    import random
+    # set seed, to be deterministic
+    seed = 123
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
 def train_one_epoch(
     model: torch.nn.Module,
     optimizer: torch.optim,
@@ -186,120 +194,124 @@ def save_checkpoint(
     )
 
 
+def main(args):
+    # # 
+    # DATASET = 'flowers102'
+    # LEARNING_RATE = 0.2
+    # ARCHITECTURE = "ConvNextV2"
+    # EPOCHS = 30
 
-# # 
-# DATASET = 'flowers102'
-# LEARNING_RATE = 0.2
-# ARCHITECTURE = "ConvNextV2"
-# EPOCHS = 30
+    params = yaml.safe_load(open('params.yaml'))
+    # IMG_SIZE = params['IMG_SIZE']
+    # IMG_SIZE = int(IMG_SIZE)
+    ROOT_DIR = params['ROOT_DIR']
+    BATCH_SIZE = params['BATCH_SIZE']
+    LEARNING_RATE = params['LEARNING_RATE']
+    EPOCHS = params['EPOCHS']
+    OPTIMIZER = params['OPTIMIZER']
+    DATA_AUG = params['DATA_AUG']
+    ARCHITECTURE = params['ARCHITECTURE']
+    DATASET = params['DATASET']
 
-parser = argparse.ArgumentParser("Training parser")
-parser.add_argument("--exp", "-e", type=str, help="WandB experiment name")
-args = parser.parse_args()
+    set_determinism()
 
-params = yaml.safe_load(open('params.yaml'))
-# IMG_SIZE = params['IMG_SIZE']
-# IMG_SIZE = int(IMG_SIZE)
-ROOT_DIR = params['ROOT_DIR']
-BATCH_SIZE = params['BATCH_SIZE']
-LEARNING_RATE = params['LEARNING_RATE']
-EPOCHS = params['EPOCHS']
-OPTIMIZER = params['OPTIMIZER']
-DATA_AUG = params['DATA_AUG']
-ARCHITECTURE = params['ARCHITECTURE']
-DATASET = params['DATASET']
+    if not DATA_AUG:
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # Randomly crop to 224x224 with scale variation
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),  # Random rotation and translation
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.3),
+            transforms.PILToTensor()  # Convert image to tensor
+        ])
+        test_transform = transforms.Compose([
+            transforms.Resize((224, 224)),  # Resize to 224x224 (standard for pretrained models)
+            transforms.PILToTensor()  # Convert image to tensor
+        ])
 
-if not DATA_AUG:
-    train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # Randomly crop to 224x224 with scale variation
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),  # Random rotation and translation
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.3),
-        transforms.PILToTensor()  # Convert image to tensor
-    ])
-    test_transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize to 224x224 (standard for pretrained models)
-        transforms.PILToTensor()  # Convert image to tensor
-    ])
-
-else:
-    print('DATA AUG NOT IMPLEMENTED')
-    exit(0)
+    else:
+        print('DATA AUG NOT IMPLEMENTED')
+        exit(0)
 
 
-if DATASET == 'flowers102':
-    NUM_CLASSES = 102
-    flowers102_root = './data/flowers-102'
-    train_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='test', download=True, transform=train_transform)
-    test_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='train', download=True, transform=test_transform)
+    if DATASET == 'flowers102':
+        NUM_CLASSES = 102
+        flowers102_root = './data/flowers-102'
+        train_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='test', download=True, transform=train_transform)
+        test_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='train', download=True, transform=test_transform)
 
-elif DATASET == 'imagewoof':
-    NUM_CLASSES = 10
-    extract_path = './data/imagewoof2-160' 
-    train_dir = os.path.join(extract_path, 'imagewoof2-160/train')
-    valid_dir = os.path.join(extract_path, 'imagewoof2-160/val')
+    elif DATASET == 'imagewoof':
+        NUM_CLASSES = 10
+        extract_path = './data/imagewoof2-160' 
+        train_dir = os.path.join(extract_path, 'imagewoof2-160/train')
+        valid_dir = os.path.join(extract_path, 'imagewoof2-160/val')
 
-    train_dataset = ImageFolder(root=train_dir, transform=train_transform)
-    test_dataset = ImageFolder(root=valid_dir, transform=test_transform)
+        train_dataset = ImageFolder(root=train_dir, transform=train_transform)
+        test_dataset = ImageFolder(root=valid_dir, transform=test_transform)
 
 
-elif DATASET == 'combined':
-    NUM_CLASSES = 212
-    train_dataset, test_dataset = get_combined_dataset(train_transform, test_transform)
-else:
-    print('Error: Wrong Dataset')
-    exit(0)
+    elif DATASET == 'combined':
+        NUM_CLASSES = 212
+        train_dataset, test_dataset = get_combined_dataset(train_transform, test_transform)
+    else:
+        print('Error: Wrong Dataset')
+        exit(0)
 
-#NOTE: using this to overfit
-# from torch.utils.data import Subset
-# frac = 0.1
-# train_dataset = Subset(train_dataset, np.random.choice(np.arange(len(train_dataset)), int(len(train_dataset) * frac)))
-# test_dataset = Subset(test_dataset, np.random.choice(np.arange(len(test_dataset)), int(len(test_dataset) * frac)))
+    #NOTE: using this to overfit
+    # from torch.utils.data import Subset
+    # frac = 0.1
+    # train_dataset = Subset(train_dataset, np.random.choice(np.arange(len(train_dataset)), int(len(train_dataset) * frac)))
+    # test_dataset = Subset(test_dataset, np.random.choice(np.arange(len(test_dataset)), int(len(test_dataset) * frac)))
 
-num_workers = os.cpu_count()//2
-train_dataloader = torch.utils.data.DataLoader(
-    train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, drop_last=True
-)
+    num_workers = os.cpu_count()//2
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, drop_last=True
+    )
 
-test_dataloader = torch.utils.data.DataLoader(
-    test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers
-)
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers
+    )
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-model = ConvNextV2(num_classes=NUM_CLASSES, weights_path=ARCHITECTURE)
-model.to(device)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    model = ConvNextV2(num_classes=NUM_CLASSES, weights_path=ARCHITECTURE)
+    model.to(device)
 
-if OPTIMIZER == 'adam':
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-elif OPTIMIZER == 'adamw':
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-elif OPTIMIZER == 'sgd':
-    optimizer = torch.optim.SGD(model.parameters(), lr=LEARNING_RATE)
-else:
-    print('Optimizer not set')
-    exit(0)
+    if OPTIMIZER == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    elif OPTIMIZER == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    elif OPTIMIZER == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(), lr=LEARNING_RATE)
+    else:
+        print('Optimizer not set')
+        exit(0)
 
-criterion = torch.nn.CrossEntropyLoss()
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5) 
-# Cosine Scheduler that resets every 10 epochs
-# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10) 
-    
-wandb.init(
-    # set the wandb project where this run will be logged
-    project="convnextv2",
-    name=f"{args.exp}_{DATASET}",
-    # track hyperparameters and run metadata
-    config={
-    "learning_rate": LEARNING_RATE,
-    "architecture": ARCHITECTURE,
-    "dataset": DATASET,
-    "epochs": EPOCHS,
-    }
-)
-save_path = os.path.join("models", DATASET)
+    criterion = torch.nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5) 
+    # Cosine Scheduler that resets every 10 epochs
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10) 
+        
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="convnextv2",
+        name=f"{args.exp}_{DATASET}",
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": LEARNING_RATE,
+        "architecture": ARCHITECTURE,
+        "dataset": DATASET,
+        "epochs": EPOCHS,
+        }
+    )
+    save_path = os.path.join("models", DATASET)
 
-loss_statistics = train(
-    model, optimizer, train_dataloader, EPOCHS, criterion, device, test_dataloader, scheduler, save_path
-)
-save_checkpoint(model, EPOCHS, optimizer, '00', os.path.join(save_path, "last.pth"))
+    loss_statistics = train(
+        model, optimizer, train_dataloader, EPOCHS, criterion, device, test_dataloader, scheduler, save_path
+    )
+    save_checkpoint(model, EPOCHS, optimizer, '00', os.path.join(save_path, "last.pth"))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser("Training parser")
+    parser.add_argument("--exp", "-e", type=str, help="WandB experiment name")
+    args = parser.parse_args()
+    main(args)

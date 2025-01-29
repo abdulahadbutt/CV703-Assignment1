@@ -128,27 +128,27 @@ def get_combined_dataset(train_transform=None, test_transform=None):
     # Remap labels for each dataset to avoid conflicts
     start_label = 0
 
-    imagewoof_train, start_label_fgcv = update_targets(imagewoof_train, start_label)
-    imagewoof_val, _ = update_targets(imagewoof_val, start_label)
-    print("left imagewoof")
+    start_label_fgcv = start_label + len(imagewoof_train.classes)
+    # imagewoof_train, start_label_fgcv = update_targets(imagewoof_train, start_label)
+    # imagewoof_val, _ = update_targets(imagewoof_val, start_label)
+    # print("left imagewoof")
 
 
 
     fgvc_trainval = ModifiedFGVCAircraft(root=fgvc_aircraft_root, split='trainval', download=True, transform=train_transform, startlabel=start_label_fgcv)
     fgvc_test = ModifiedFGVCAircraft(root=fgvc_aircraft_root, split='test', download=True, transform=test_transform, startlabel=start_label_fgcv)
 
-    fgvc_trainval, start_label_flowers = update_targets(fgvc_trainval, start_label_fgcv)
-    fgvc_test, _ = update_targets(fgvc_test, start_label_fgcv)
-    print("left FGVC")
+    start_label_flowers = start_label_fgcv + len(fgvc_trainval.classes)
+    # fgvc_trainval, start_label_flowers = update_targets(fgvc_trainval, start_label_fgcv)
+    # fgvc_test, _ = update_targets(fgvc_test, start_label_fgcv)
 
 
 
     flowers_train = ModifiedFlowers102(root=flowers102_root, split='test', download=True, transform=train_transform, startlabel=start_label_flowers)
     flowers_test = ModifiedFlowers102(root=flowers102_root, split='train', download=True, transform=test_transform, startlabel=start_label_flowers)
 
-    flowers_train, _ = update_targets(flowers_train, start_label_flowers)
-    flowers_test, _ = update_targets(flowers_test, start_label_flowers)
-    print("left flowers")
+    # flowers_train, _ = update_targets(flowers_train, start_label_flowers)
+    # flowers_test, _ = update_targets(flowers_test, start_label_flowers)
 
 
     # Create train and test datasets as per the requirement

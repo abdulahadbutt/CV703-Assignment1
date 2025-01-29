@@ -11,8 +11,9 @@ class ConvNextV2(nn.Module):
         self.preprocessor = AutoImageProcessor.from_pretrained(weights_path)
         self.base_model = ConvNextV2ForImageClassification.from_pretrained(weights_path)
 
+        in_features = self.base_model.classifier.in_features
         self.base_model.classifier = nn.Linear(
-            in_features=1024,
+            in_features=in_features,
             out_features=num_classes,
             bias=True
         )

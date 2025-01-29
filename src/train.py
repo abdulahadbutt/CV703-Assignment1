@@ -11,6 +11,7 @@ import wandb
 from tqdm import tqdm 
 import numpy as np 
 import yaml 
+import argparse
 
 def train_one_epoch(
     model: torch.nn.Module,
@@ -23,28 +24,30 @@ def train_one_epoch(
     # print(model)
 
     model.train()
+    scaler = torch.cuda.amp.GradScaler()
     with tqdm(data_loader, unit='batch') as data:
         batch_loss_list = []
-        for batch in data:
+        for (inputs, labels) in data:
             data.set_description(f"Epoch {epoch_index}")
 
-            # ? Feeding to CNN
-            inputs, labels = batch[0].to(device), batch[1].to(device)
+            labels = labels.to(device)
+            inputs = model.preprocessor(images=inputs, return_tensors="pt")['pixel_values'].to(device)
+
             optimizer.zero_grad()
-            # print(inputs.shape, labels.shape)
-            outputs = model(inputs)
-            outputs = outputs['logits']
-            # print(outputs)
-            # exit(0)
             
-            # ? Getting Loss
-            batch_loss = criterion(outputs, labels)
+            # ? Feeding to CNN
+            with torch.autocast("cuda"):
+                outputs = model(inputs)['logits']
+                # ? Getting Loss
+                batch_loss = criterion(outputs, labels)
+            
             batch_loss_list.append(batch_loss.item())
-            batch_loss.backward()
 
+            # Backpropagation with scaling
+            scaler.scale(batch_loss).backward()
+            scaler.step(optimizer)  # Update optimizer
             # ? Gradient Descent
-            optimizer.step()
-
+            scaler.update()  # Update the scale for next step
 
             data.set_postfix(
                 batch_loss=batch_loss.item()
@@ -61,7 +64,6 @@ def train_one_epoch(
 
 def test_one_epoch(
     model: torch.nn.Module,
-    optimizer: torch.optim,
     data_loader: torch.utils.data.DataLoader,
     epoch_index: int,
     criterion: torch.nn.CrossEntropyLoss,
@@ -70,27 +72,29 @@ def test_one_epoch(
     model.eval()
     num_correct = 0
     num_samples = 0
-    with torch.no_grad():
-        with tqdm(data_loader, unit='batch') as data:
-            batch_loss_list = []
-            for batch in data:
-                data.set_description(f"Testing after epoch{epoch_index}")
+    with torch.no_grad(), tqdm(data_loader, unit='batch') as data:
+        batch_loss_list = []
+        for (inputs, labels) in data:
+            data.set_description(f"Testing after epoch{epoch_index}")
 
-                # ? Feeding to CNN
-                inputs, labels = batch[0].to(device), batch[1].to(device)
-                outputs = model(inputs)
-                
-                # ? Getting Loss
-                batch_loss = criterion(outputs, labels)
-                batch_loss_list.append(batch_loss.item())
+            labels = labels.to(device)
+            inputs = model.preprocessor(images=inputs, return_tensors="pt")['pixel_values'].to(device)
 
-                data.set_postfix(
-                    batch_loss=batch_loss.item()
-                )
+            # ? Feeding to CNN
+            outputs = model(inputs)
+            outputs = outputs['logits']
+            
+            # ? Getting Loss
+            batch_loss = criterion(outputs, labels)
+            batch_loss_list.append(batch_loss.item())
 
-                _, predictions = outputs.max(1)
-                num_correct += (predictions == labels).sum()
-                num_samples += predictions.size(0)
+            data.set_postfix(
+                batch_loss=batch_loss.item()
+            )
+
+            _, predictions = outputs.max(1)
+            num_correct += (predictions == labels).sum()
+            num_samples += predictions.size(0)
 
 
     
@@ -112,7 +116,8 @@ def train(
     criterion: torch.nn.CrossEntropyLoss,
     device:torch.device,
     test_dataloader: torch.utils.data.DataLoader,
-    scheduler: torch.optim.lr_scheduler.LRScheduler
+    scheduler,
+    save_path: str
 ):
 
     
@@ -125,18 +130,19 @@ def train(
         )
         train_statistics_list.append(train_epoch_statistics)
         # live.log_metric('train/loss', train_epoch_statistics['epoch_loss'], plot=True)
-        if scheduler:
-            scheduler.step()
         
         # * Testing Code
         test_epoch_statistics = test_one_epoch(
-            model, optimizer, test_dataloader, epoch, criterion, device
+            model, test_dataloader, epoch, criterion, device
         )
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(test_epoch_statistics["epoch_loss"])
+
         latest_test_acc = test_epoch_statistics['accuracy']
         if latest_test_acc > best_acc:
             print(f'UPDATING BEST ACC [{best_acc}] -> [{latest_test_acc}]')
             best_acc = latest_test_acc
-            save_checkpoint(model, epoch, optimizer, best_acc, 'models/best_model.pth')
+            save_checkpoint(model, epoch, optimizer, best_acc, os.path.join(save_path, "best.pth"))
         
         
         wandb.log({
@@ -145,6 +151,9 @@ def train(
             "test/loss": test_epoch_statistics['epoch_loss'],
             "test/accuracy": test_epoch_statistics['accuracy']
         })
+        if(scheduler):
+            wandb.log({"lr": optimizer.param_groups[0]['lr']})
+
         print(latest_test_acc, type(latest_test_acc))
         # live.log_metric('test/loss', test_epoch_statistics['epoch_loss'], plot=True)
         # live.log_metric('test/accuracy', test_epoch_statistics['accuracy'], plot=True)
@@ -164,6 +173,8 @@ def save_checkpoint(
         f1_score: int, 
         path: str):
     
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    
     torch.save(
         {
             "epoch": epoch,
@@ -182,6 +193,9 @@ def save_checkpoint(
 # ARCHITECTURE = "ConvNextV2"
 # EPOCHS = 30
 
+parser = argparse.ArgumentParser("Training parser")
+parser.add_argument("--exp", "-e", type=str, help="WandB experiment name")
+args = parser.parse_args()
 
 params = yaml.safe_load(open('params.yaml'))
 # IMG_SIZE = params['IMG_SIZE']
@@ -195,13 +209,20 @@ DATA_AUG = params['DATA_AUG']
 ARCHITECTURE = params['ARCHITECTURE']
 DATASET = params['DATASET']
 
-
-
 if not DATA_AUG:
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize to 224x224 (standard for pretrained models)
-        transforms.ToTensor()  # Convert image to tensor
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),  # Randomly crop to 224x224 with scale variation
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),  # Random rotation and translation
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.3),
+        transforms.PILToTensor()  # Convert image to tensor
     ])
+    test_transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Resize to 224x224 (standard for pretrained models)
+        transforms.PILToTensor()  # Convert image to tensor
+    ])
+
 else:
     print('DATA AUG NOT IMPLEMENTED')
     exit(0)
@@ -210,8 +231,8 @@ else:
 if DATASET == 'flowers102':
     NUM_CLASSES = 102
     flowers102_root = './data/flowers-102'
-    train_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='test', download=True, transform=transform)
-    test_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='train', download=True, transform=transform)
+    train_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='test', download=True, transform=train_transform)
+    test_dataset = torchvision.datasets.Flowers102(root=flowers102_root, split='train', download=True, transform=test_transform)
 
 elif DATASET == 'imagewoof':
     NUM_CLASSES = 10
@@ -219,26 +240,30 @@ elif DATASET == 'imagewoof':
     train_dir = os.path.join(extract_path, 'imagewoof2-160/train')
     valid_dir = os.path.join(extract_path, 'imagewoof2-160/val')
 
-    train_dataset = ImageFolder(root=train_dir, transform=transform)
-    test_dataset = ImageFolder(root=valid_dir, transform=transform)
+    train_dataset = ImageFolder(root=train_dir, transform=train_transform)
+    test_dataset = ImageFolder(root=valid_dir, transform=test_transform)
 
 
 elif DATASET == 'combined':
     NUM_CLASSES = 212
-    train_dataset, test_dataset = get_combined_dataset()
+    train_dataset, test_dataset = get_combined_dataset(train_transform, test_transform)
 else:
     print('Error: Wrong Dataset')
     exit(0)
 
+#NOTE: using this to overfit
+# from torch.utils.data import Subset
+# frac = 0.1
+# train_dataset = Subset(train_dataset, np.random.choice(np.arange(len(train_dataset)), int(len(train_dataset) * frac)))
+# test_dataset = Subset(test_dataset, np.random.choice(np.arange(len(test_dataset)), int(len(test_dataset) * frac)))
 
-
-
+num_workers = os.cpu_count()//2
 train_dataloader = torch.utils.data.DataLoader(
-    train_dataset, batch_size=BATCH_SIZE, shuffle=True
+    train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, drop_last=True
 )
 
 test_dataloader = torch.utils.data.DataLoader(
-    test_dataset, batch_size=BATCH_SIZE, shuffle=False
+    test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers
 )
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -247,18 +272,23 @@ model.to(device)
 
 if OPTIMIZER == 'adam':
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+elif OPTIMIZER == 'adamw':
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+elif OPTIMIZER == 'sgd':
+    optimizer = torch.optim.SGD(model.parameters(), lr=LEARNING_RATE)
 else:
     print('Optimizer not set')
     exit(0)
 
 criterion = torch.nn.CrossEntropyLoss()
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5) 
+# Cosine Scheduler that resets every 10 epochs
+# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10) 
     
-
-scheduler = None 
 wandb.init(
     # set the wandb project where this run will be logged
-    project="CV703-Assignment1",
-
+    project="convnextv2",
+    name=f"{args.exp}_{DATASET}",
     # track hyperparameters and run metadata
     config={
     "learning_rate": LEARNING_RATE,
@@ -267,9 +297,9 @@ wandb.init(
     "epochs": EPOCHS,
     }
 )
-
+save_path = os.path.join("models", DATASET)
 
 loss_statistics = train(
-    model, optimizer, train_dataloader, EPOCHS, criterion, device, test_dataloader, scheduler
+    model, optimizer, train_dataloader, EPOCHS, criterion, device, test_dataloader, scheduler, save_path
 )
-save_checkpoint(model, EPOCHS, optimizer, '00', 'models/last.pth')
+save_checkpoint(model, EPOCHS, optimizer, '00', os.path.join(save_path, "last.pth"))
